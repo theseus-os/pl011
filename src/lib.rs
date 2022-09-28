@@ -15,7 +15,6 @@
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::Deref;
-use cortex_m::interrupt;
 use embedded_hal::serial;
 use nb;
 use volatile_register::{RO, RW, WO};
@@ -323,13 +322,11 @@ macro_rules! create_uart {
             ///
             /// Can only be taken once. If taken again returns None
             pub fn take() -> Option<Self> {
-                    interrupt::free(|_| {
-                        if unsafe {$global} {
-                            None
-                        } else {
-                            Some(unsafe {$uart::steal()})
-                        }
-                    })
+                if unsafe {$global} {
+                    None
+                } else {
+                    Some(unsafe {$uart::steal()})
+                }
             }
             /// Unsafe function to steal hardware resources.
             ///
@@ -344,22 +341,7 @@ macro_rules! create_uart {
 create_uart!(
     /// Hardware Singleton for UART1 
     struct UART1,
-    UART1_TAKEN, 0x4000_c000);
-
-create_uart!(
-    /// Hardware Singleton for UART2
-    struct UART2,
-    UART2_TAKEN, 0x4000_d000);
-
-create_uart!(
-    /// Hardware Singleton for UART3
-    struct UART3,
-    UART3_TAKEN, 0x4000_e000);
-
-create_uart!(
-    /// Hardware Singleton for UART4
-    struct UART4,
-    UART4_TAKEN, 0x4000_f000);
+    UART1_TAKEN, 0x0900_0000);
 
 /// miscellaneous internal traits
 pub mod detail {
