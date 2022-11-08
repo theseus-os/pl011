@@ -298,9 +298,7 @@ macro_rules! create_uart {
         $addr:literal
     ) => {
         $(#[$attr])*
-            pub struct $uart {
-                _marker: PhantomData<*const ()>,
-            }
+            pub struct $uart;
         impl detail::ConstRegBlockPtr<PL011_Regs> for $uart {
             /// returns a pointer to the register block
             fn ptr() -> *const PL011_Regs {
@@ -333,7 +331,7 @@ macro_rules! create_uart {
             /// Should not be needed if properly passing around the uart
             pub unsafe fn steal() -> Self {
                 $global = true;
-                $uart {_marker : PhantomData}
+                $uart
             }
         }
     }
