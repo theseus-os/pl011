@@ -1,21 +1,14 @@
 [package]
-authors = ["Andy Goetz <andy@andygoetz.org>"]
-edition = "2018"
+authors = ["Andy Goetz <andy@andygoetz.org>", "Nathan Royer <nathan.royer.pro@gmail.com>"]
+edition = "2021"
 readme = "README.md"
-name = "pl011_qemu"
-version = "0.2.0"
+name = "pl011"
+version = "1.0.0"
 license = "Apache-2.0"
-repository = "https://github.com/apgoetz/pl011_qemu"
-homepage = "https://github.com/apgoetz/pl011_qemu"
-description = "Simple Driver for PL011 UARTs in QEMU"
+repository = "https://github.com/theseus-os/pl011/"
+homepage = "https://github.com/theseus-os/pl011/"
+description = "Simple Driver for PL011 UARTs"
 
 [dependencies]
-cortex-m = "0.7.6"
 volatile-register = "0.2.0"
-embedded-hal = "0.2.4"
-nb = "1.0.0"
-
-[dev-dependencies]
-cortex-m-rt = "0.6.10"
-panic-halt = "0.2.0"
-cortex-m-semihosting = "0.3.3"
+log = "0.4.8"
