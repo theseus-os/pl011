@@ -2,13 +2,25 @@
 //!
 //! This crate provides basic drivers for the UARTS exposed by
 //! QEMU. You can see the implementation of these uarts
-//! [here](https://github.com/qemu/qemu/blob/master/hw/char/pl011.c)
+//! [here](https://github.com/qemu/qemu/blob/master/hw/arm/stellaris.c)
+//!
+//! The QEMU target actually exposes 4 different UARTS, that can each
+//! be redirected to arbitary character devices or files. This crate
+//! allows those UARTS to be accessed in order to support more
+//! complicated use cases than can be provided by
+//! [cortex_m_semihosting](https://crates.io/crates/cortex-m-semihosting).
 
+#![deny(missing_docs)]
 #![no_std]
 use core::fmt;
+use core::marker::PhantomData;
+use core::ops::Deref;
+use embedded_hal::serial;
+use nb;
 use volatile_register::{RO, RW, WO};
 
-/// Struct representing PL011 registers. Not intended to be directly used
+/// Struct representing PL011 registers. Not intended to be directly
+/// used
 #[repr(C)]
 pub struct PL011_Regs {
     /// Data Register
@@ -60,20 +72,108 @@ pub struct PL011_Regs {
     pub uartpcellid3: RO<u32>,
 }
 
-const UARTIMSC_RXIM: u32 = 1 << 4;
+/// Error type necessary for embedded_hal usage. No errors supported
+#[derive(Debug, Copy, Clone)]
+pub struct Error;
 
-const UARTLCR_FEN: u32 = 1 << 4;
-
-const UARTCR_RX_ENABLED: u32 = 1 << 9;
-const UARTCR_TX_ENABLED: u32 = 1 << 8;
-const UARTCR_UART_ENABLED: u32 = 1 << 0;
-
-const UARTFR_RX_BUF_EMPTY: u32 = 1 << 4;
-const UARTFR_TX_BUF_FULL: u32 = 1 << 5;
-
-/// A PL011 Single-Serial-Port Controller.
+/// Struct representing the actual driver.
+///
+/// Notice that there are no silly ideas like setting the baud rate,
+/// or assigning GPIO pins to the driver: the qemu implementation
+/// doesnt need any of that, we can just write to the registers
+/// directly.
+///
+/// Implements embedded_hal::serial as well as core::fmt::Write
+///
+/// # Examples
+///
+/// ```
+/// use pl011_qemu;
+/// // build a driver for UART1
+/// let mut uart = pl011_qemu::PL011::new(pl011_qemu::UART1::take().unwrap());
+/// ```
 pub struct PL011 {
     regs: &'static mut PL011_Regs,
+}
+
+/// RX methods
+impl PL011 {
+    /// Is the receive-buffer-empty flag clear?
+    pub fn has_incoming_data(&self) -> bool {
+        let uartfr = unsafe { (*self.regs).uartfr.read() };
+        uartfr & 0x10 == 0
+    }
+
+    /// reads a single byte out the uart
+    ///
+    /// spins until a byte is available in the fifo
+    pub fn read_byte(&self) -> u8 {
+        // loop while RXFE is set
+        while !self.has_incoming_data() {}
+        // read the data register. Atomic read is side effect free
+        let data = unsafe { (*self.regs).uartdr.read() & 0xff };
+        data as u8
+    }
+}
+
+/// TX methods
+impl PL011 {
+    /// writes a single byte out the uart
+    ///
+    /// spins until space is available in the fifo
+    pub fn write_byte(&self, data: u8) {
+        while !self.is_writeable() {}
+        unsafe { (*self.regs).uartdr.write(data as u32) };
+    }
+
+    /// Is the transmit-buffer-full flag clear?
+    pub fn is_writeable(&self) -> bool {
+        let uartfr = unsafe { (*self.regs).uartfr.read() };
+        uartfr & 0x20 == 0
+    }
+}
+
+impl serial::Read<u8> for PL011 {
+    type Error = Error;
+
+    fn read(&mut self) -> nb::Result<u8, Self::Error> {
+        // if RXFE is set (rx fifo is empty)
+        if self.has_incoming_data() {
+            Ok(unsafe { (*self.regs).uartdr.read() & 0xff } as u8)
+        } else {
+            Err(nb::Error::WouldBlock)
+        }
+    }
+}
+
+impl serial::Write<u8> for PL011 {
+    type Error = Error;
+
+    fn write(&mut self, word: u8) -> nb::Result<(), Self::Error> {
+        self.flush()?;
+        unsafe { (*self.regs).uartdr.write(word as u32) };
+        Ok(())
+    }
+
+    fn flush(&mut self) -> nb::Result<(), Self::Error> {
+        if self.is_writeable() {
+            Ok(())
+        } else {
+            Err(nb::Error::WouldBlock)
+        }
+    }
+}
+
+impl fmt::Write for PL011 {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        use embedded_hal::serial::Write;
+        for b in s.as_bytes().iter() {
+            if nb::block!(self.write(*b)).is_err() {
+                return Err(fmt::Error);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Generic methods
@@ -82,93 +182,5 @@ impl PL011 {
     pub fn new(regs: *mut PL011_Regs) -> Self {
         let regs = unsafe { regs.as_mut() }.unwrap();
         Self { regs }
-    }
-
-    /// Enable on-receive interrupt
-    pub fn enable_rx_interrupt(&mut self, enable: bool) {
-        let mut reg = (*self.regs).uartimsc.read();
-
-        match enable {
-            true  => reg |=  UARTIMSC_RXIM,
-            false => reg &= !UARTIMSC_RXIM,
-        };
-
-        unsafe { (*self.regs).uartimsc.write(reg) };
-    }
-
-    /// Set FIFO mode
-    pub fn set_fifo_mode(&mut self, enable: bool) {
-        let mut reg = (*self.regs).uartlcr_h.read();
-
-        match enable {
-            true  => reg |=  UARTLCR_FEN,
-            false => reg &= !UARTLCR_FEN,
-        };
-
-        unsafe { (*self.regs).uartlcr_h.write(reg) };
-    }
-
-    /// Outputs a summary of the state of the controller using `log::info!()`
-    pub fn log_status(&self) {
-        let reg = (*self.regs).uartcr.read();
-        log::info!("RX enabled: {}", (reg & UARTCR_RX_ENABLED) > 0);
-        log::info!("TX enabled: {}", (reg & UARTCR_TX_ENABLED) > 0);
-        log::info!("UART enabled: {}", (reg & UARTCR_UART_ENABLED) > 0);
-    }
-
-    /// Returns true if the receive-buffer-empty flag is clear.
-    pub fn has_incoming_data(&self) -> bool {
-        let uartfr = (*self.regs).uartfr.read();
-        uartfr & UARTFR_RX_BUF_EMPTY == 0
-    }
-
-    /// Reads a single byte out the uart
-    ///
-    /// Spins until a byte is available in the fifo.
-    pub fn read_byte(&self) -> u8 {
-        while !self.has_incoming_data() {}
-        (*self.regs).uartdr.read() as u8
-    }
-
-    /// Reads bytes into a slice until there is none available.
-    pub fn read_bytes(&self, bytes: &mut [u8]) -> usize {
-        let mut read = 0;
-
-        while read < bytes.len() && self.has_incoming_data() {
-            bytes[read] = self.read_byte();
-            read += 1;
-        }
-
-        read
-    }
-
-    /// Returns true if the transmit-buffer-full flag is clear.
-    pub fn is_writeable(&self) -> bool {
-        let uartfr = (*self.regs).uartfr.read();
-        uartfr & UARTFR_TX_BUF_FULL == 0
-    }
-
-    /// Writes a single byte out the uart.
-    ///
-    /// Spins until space is available in the fifo.
-    pub fn write_byte(&self, data: u8) {
-        while !self.is_writeable() {}
-        unsafe { (*self.regs).uartdr.write(data as u32) };
-    }
-
-    /// Writes a byte slice out the uart.
-    ///
-    /// Spins until space is available in the fifo.
-    pub fn write_bytes(&self, bytes: &[u8]) {
-        for b in bytes {
-            self.write_byte(*b);
-        }
-    }
-}
-
-impl fmt::Write for PL011 {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.write_bytes(s.as_bytes());
-        Ok(())
     }
 }
